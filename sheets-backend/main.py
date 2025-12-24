@@ -167,14 +167,26 @@ def student_from_row(row: dict) -> Optional[Dict[str, Any]]:
 
 
 def get_teacher_by_email(email: str) -> Optional[Dict[str, Any]]:
-    res = supabase.table("teachers").select("*").eq("email", email).maybe_single()
+    res = (
+        supabase
+        .table("teachers")
+        .select("*")
+        .eq("email", email)
+        .maybe_single()
+        .execute()
+    )
     return teacher_from_row(res.data) if res.data else None
 
-
 def get_student_by_email(email: str) -> Optional[Dict[str, Any]]:
-    res = supabase.table("students").select("*").eq("email", email).maybe_single()
+    res = (
+        supabase
+        .table("students")
+        .select("*")
+        .eq("email", email)
+        .maybe_single()
+        .execute()
+    )
     return student_from_row(res.data) if res.data else None
-
 
 def get_password_hash(password: str) -> str:
     """Hash a password using SHA-256"""
