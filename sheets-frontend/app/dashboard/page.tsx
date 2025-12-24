@@ -108,32 +108,30 @@ export default function DashboardPage() {
 
   // Load classes from backend
   const loadClassesFromBackend = async () => {
+    if (!user) return;
+  
     try {
       setSyncing(true);
       setSyncError('');
-
+  
       const backendClasses = await classService.loadClasses();
-
-      if (backendClasses.length > 0) {
+  
+      if (backendClasses && backendClasses.length > 0) {
+        // Normal case: classes exist on server
         setClasses(backendClasses);
         setShowSnapshot(true);
-      } else {
-        // Try loading from localStorage as fallback
-        const localClasses = localStorage.getItem(`classes_${user?.id}`);
-        if (localClasses) {
-          const parsed: Class[] = JSON.parse(localClasses);
-          setClasses(parsed);
-
-          // Sync local classes to backend
-          if (parsed.length > 0) {
-            await syncToBackend(parsed);
-          }
-        }
+        setSyncError('');   // no banner
+        return;
       }
+  
+      // 0 classes on server is NOT an error → show empty dashboard
+      setClasses([]);
+      setShowSnapshot(true);
+      setSyncError('');     // make sure old “offline” message is cleared
     } catch (error) {
       console.error('Error loading classes:', error);
       setSyncError('Failed to sync with server. Working offline.');
-
+  
       // Load from localStorage as fallback
       const localClasses = localStorage.getItem(`classes_${user?.id}`);
       if (localClasses) {
