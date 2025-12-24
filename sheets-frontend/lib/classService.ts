@@ -65,18 +65,18 @@ class ClassService {
 
   async getAllClasses(): Promise<Class[]> {
     try {
-      const result = await this.apiCall<{ classes: Class[] }>('/classes');
-      return result;
+      const result = await this.apiCall<Class[]>('/classes');  // 👈 type
+      return result;                                           // 👈 no .classes
     } catch (error) {
       console.error('Error fetching classes:', error);
       throw error;
     }
   }
-
+  
   async getClass(classId: string): Promise<Class> {
     try {
-      const result = await this.apiCall<{ class: Class }>(`/classes/${classId}`);
-      return result;
+      const result = await this.apiCall<Class>(`/classes/${classId}`);  // 👈 type
+      return result;                                                    // 👈 no .class
     } catch (error) {
       console.error('Error fetching class:', error);
       throw error;
