@@ -2,24 +2,24 @@
 
 import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { useAuth } from '@/lib/auth-context-email';
-import { classService, Class } from '@/lib/classService';
+import { useAuth } from '../lib/auth-context-email';
+import { classService, Class } from '../lib/classService';
 import { Menu, User, Users, LayoutDashboard } from 'lucide-react';
-import Sidebar from '@/components/dashboard/Sidebar';
-import EmptyState from '@/components/dashboard/EmptyState';
-import AttendanceSheet from '@/components/dashboard/AttendanceSheet';
-import AllClassesView from '@/components/dashboard/AllClassesView';
-import SnapshotView from '@/components/dashboard/SnapshotView';
-import ClassThresholdSettings from '@/components/dashboard/ClassThresholdSettings';
-import SettingsModal from '@/components/dashboard/SettingsModal';
-import ChangePasswordModal from '@/components/dashboard/ChangePasswordModal';
-import AddClassModal from '@/components/dashboard/AddClassModal';
-import AddColumnModal from '@/components/dashboard/AddColumnModal';
-import DeleteClassModal from '@/components/dashboard/DeleteClassModal';
-import ImportDataState from '@/components/dashboard/ImportDataState';
-import MonthYearSelector from '@/components/dashboard/MonthYearSelector';
-import { AttendanceThresholds, Student, CustomColumn } from '@/types';
-import QRAttendanceModal from '@/components/QRAttendanceModal';
+import Sidebar from '../components/dashboard/Sidebar';
+import EmptyState from '../components/dashboard/EmptyState';
+import AttendanceSheet from '../components/dashboard/AttendanceSheet';
+import AllClassesView from '../components/dashboard/AllClassesView';
+import SnapshotView from '../components/dashboard/SnapshotView';
+import ClassThresholdSettings from '../components/dashboard/ClassThresholdSettings';
+import SettingsModal from '../components/dashboard/SettingsModal';
+import ChangePasswordModal from '../components/dashboard/ChangePasswordModal';
+import AddClassModal from '../components/dashboard/AddClassModal';
+import AddColumnModal from '../components/dashboard/AddColumnModal';
+import DeleteClassModal from '../components/dashboard/DeleteClassModal';
+import ImportDataState from '../components/dashboard/ImportDataState';
+import MonthYearSelector from '../components/dashboard/MonthYearSelector';
+import { AttendanceThresholds, Student, CustomColumn } from '../types';
+import QRAttendanceModal from '../components/QRAttendanceModal';
 
 export default function DashboardPage() {
   const router = useRouter();
