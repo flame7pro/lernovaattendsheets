@@ -5,21 +5,21 @@ import { useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/auth-context-email';
 import { classService, Class } from '@/lib/classService';
 import { Menu, User, Users, LayoutDashboard } from 'lucide-react';
-import { Sidebar } from '../components/dashboard/Sidebar';
-import { EmptyState } from '../components/dashboard/EmptyState';
-import { AttendanceSheet } from '../components/dashboard/AttendanceSheet';
-import { AllClassesView } from '../components/dashboard/AllClassesView';
-import { SnapshotView } from '../components/dashboard/SnapshotView';
-import { ClassThresholdSettings } from '../components/dashboard/ClassThresholdSettings';
-import { SettingsModal } from '../components/dashboard/SettingsModal';
-import { ChangePasswordModal } from '../components/dashboard/ChangePasswordModal';
-import { AddClassModal } from '../components/dashboard/AddClassModal';
-import { AddColumnModal } from '../components/dashboard/AddColumnModal';
-import { DeleteClassModal } from '../components/dashboard/DeleteClassModal';
-import { ImportDataState } from '../components/dashboard/ImportDataState';
-import { MonthYearSelector } from '../components/dashboard/MonthYearSelector';
+import Sidebar from '@/components/dashboard/Sidebar';
+import EmptyState from '@/components/dashboard/EmptyState';
+import AttendanceSheet from '@/components/dashboard/AttendanceSheet';
+import AllClassesView from '@/components/dashboard/AllClassesView';
+import SnapshotView from '@/components/dashboard/SnapshotView';
+import ClassThresholdSettings from '@/components/dashboard/ClassThresholdSettings';
+import SettingsModal from '@/components/dashboard/SettingsModal';
+import ChangePasswordModal from '@/components/dashboard/ChangePasswordModal';
+import AddClassModal from '@/components/dashboard/AddClassModal';
+import AddColumnModal from '@/components/dashboard/AddColumnModal';
+import DeleteClassModal from '@/components/dashboard/DeleteClassModal';
+import ImportDataState from '@/components/dashboard/ImportDataState';
+import MonthYearSelector from '@/components/dashboard/MonthYearSelector';
 import { AttendanceThresholds, Student, CustomColumn } from '@/types';
-import { QRAttendanceModal } from '../components/QRAttendanceModal';
+import QRAttendanceModal from '@/components/QRAttendanceModal';
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -35,16 +35,16 @@ export default function DashboardPage() {
   const [currentMonth, setCurrentMonth] = useState(new Date().getMonth());
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
   const [syncing, setSyncing] = useState(false);
-  const [syncError, setSyncError] = useState('');
+  const [syncError, setSyncError] = useState<string | null>(null);
   const [showQRModal, setShowQRModal] = useState(false);
-
+  
   const [defaultThresholds, setDefaultThresholds] = useState<AttendanceThresholds>({
     excellent: 95,
     good: 90,
     moderate: 85,
     atRisk: 85,
   });
-
+  
   const [showAddClassModal, setShowAddClassModal] = useState(false);
   const [showAddColumnModal, setShowAddColumnModal] = useState(false);
   const [showDeleteClassModal, setShowDeleteClassModal] = useState(false);
@@ -53,10 +53,14 @@ export default function DashboardPage() {
   const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
   const [settingsClassId, setSettingsClassId] = useState<number | null>(null);
   const [classToDelete, setClassToDelete] = useState<Class | null>(null);
-
   const [newClassName, setNewClassName] = useState('');
   const [newColumnLabel, setNewColumnLabel] = useState('');
   const [newColumnType, setNewColumnType] = useState<'text' | 'number' | 'select'>('text');
+
+  // ✅ FIX 1: Extend Class interface with optional students
+  interface SafeClass extends Class {
+    students?: Student[];
+  }
 
   // Redirect if not authenticated
   useEffect(() => {
@@ -69,16 +73,11 @@ export default function DashboardPage() {
   useEffect(() => {
     if (isAuthenticated && typeof window !== 'undefined') {
       window.history.pushState(null, '', window.location.href);
-
       const handlePopState = () => {
         window.history.pushState(null, '', window.location.href);
       };
-
       window.addEventListener('popstate', handlePopState);
-
-      return () => {
-        window.removeEventListener('popstate', handlePopState);
-      };
+      return () => window.removeEventListener('popstate', handlePopState);
     }
   }, [isAuthenticated]);
 
@@ -92,7 +91,7 @@ export default function DashboardPage() {
   // Load thresholds from localStorage
   useEffect(() => {
     if (user) {
-      const savedThresholds = localStorage.getItem(`default_thresholds_${user.id}`);
+      const savedThresholds = localStorage.getItem(`default-thresholds-${user.id}`);
       if (savedThresholds) {
         setDefaultThresholds(JSON.parse(savedThresholds));
       }
@@ -102,51 +101,55 @@ export default function DashboardPage() {
   // Save thresholds to localStorage
   useEffect(() => {
     if (user) {
-      localStorage.setItem(`default_thresholds_${user.id}`, JSON.stringify(defaultThresholds));
+      localStorage.setItem(`default-thresholds-${user.id}`, JSON.stringify(defaultThresholds));
     }
   }, [defaultThresholds, user]);
 
-  // Load classes from backend
+  // ✅ FIX 2: Normalize loaded classes - students always array
   const loadClassesFromBackend = async () => {
     if (!user) return;
-  
     try {
       setSyncing(true);
-      setSyncError('');
-  
+      setSyncError(null);
       const backendClasses = await classService.loadClasses();
-  
+      
       if (backendClasses && backendClasses.length > 0) {
-        // Normal case: classes exist on server
-        setClasses(backendClasses);
+        // Normal case - classes exist on server
+        const normalizedClasses: SafeClass[] = backendClasses.map((c: any) => ({
+          ...c,
+          students: c.students ?? [],  // ✅ FIX: guarantee array
+        }));
+        setClasses(normalizedClasses);
         setShowSnapshot(true);
-        setSyncError('');   // no banner
+        setSyncError(null);
         return;
       }
-  
-      // 0 classes on server is NOT an error → show empty dashboard
+      
+      // 0 classes on server is NOT an error - show empty dashboard
       setClasses([]);
       setShowSnapshot(true);
-      setSyncError('');     // make sure old “offline” message is cleared
+      setSyncError(null);
     } catch (error) {
       console.error('Error loading classes:', error);
       setSyncError('Failed to sync with server. Working offline.');
-  
+      
       // Load from localStorage as fallback
-      const localClasses = localStorage.getItem(`classes_${user?.id}`);
+      const localClasses = localStorage.getItem(`classes-${user?.id}`);
       if (localClasses) {
-        const parsed: Class[] = JSON.parse(localClasses);
-        setClasses(parsed);
+        const parsed = JSON.parse(localClasses) as SafeClass[];
+        const normalizedClasses: SafeClass[] = parsed.map((c: any) => ({
+          ...c,
+          students: c.students ?? [],  // ✅ FIX: guarantee array
+        }));
+        setClasses(normalizedClasses);
       }
     } finally {
       setSyncing(false);
     }
   };
 
-  // Sync classes to backend
-  const syncToBackend = async (classesToSync: Class[]) => {
+  const syncToBackend = async (classesToSync: SafeClass[]) => {
     if (!user) return;
-
     try {
       await classService.syncClasses(classesToSync);
       console.log('Classes synced successfully');
@@ -156,27 +159,24 @@ export default function DashboardPage() {
     }
   };
 
-  // Save class to backend and localStorage
-  const saveClass = async (updatedClass: Class) => {
-    const updatedClasses = classes.map(c =>
+  const saveClass = async (updatedClass: SafeClass) => {
+    const updatedClasses = classes.map((c) =>
       c.id === updatedClass.id ? updatedClass : c
-    );
-
+    ) as SafeClass[];
     setClasses(updatedClasses);
 
     // Save to localStorage immediately
     if (user) {
-      localStorage.setItem(`classes_${user.id}`, JSON.stringify(updatedClasses));
+      localStorage.setItem(`classes-${user.id}`, JSON.stringify(updatedClasses));
     }
 
     // Sync to backend asynchronously (don't block UI)
     try {
       await classService.updateClass(String(updatedClass.id), updatedClass);
-      setSyncError(''); // Clear any previous errors
+      setSyncError(null); // Clear any previous errors
     } catch (error) {
       console.error('Error saving class to backend:', error);
-      // Don't show error to user, data is saved locally
-      // Backend will sync when connection is restored
+      // Don't show error to user, data is saved locally. Backend will sync when connection is restored
     }
   };
 
@@ -194,19 +194,23 @@ export default function DashboardPage() {
   };
 
   const handleSaveThresholds = (newThresholds: AttendanceThresholds, applyToClassIds: number[]) => {
-    const updatedClasses = classes.map(cls =>
+    const updatedClasses = classes.map((cls: SafeClass) =>
       applyToClassIds.includes(cls.id)
         ? { ...cls, thresholds: newThresholds }
         : cls
-    );
+    ) as SafeClass[];
     setClasses(updatedClasses);
 
     // Sync each updated class
-    updatedClasses.forEach(cls => {
+    updatedClasses.forEach((cls: SafeClass) => {
       if (applyToClassIds.includes(cls.id)) {
         saveClass(cls);
       }
     });
+
+    if (applyToClassIds.includes(-1)) {
+      setDefaultThresholds(newThresholds);
+    }
   };
 
   const handleOpenClassSettings = (classId: number) => {
@@ -216,23 +220,23 @@ export default function DashboardPage() {
 
   const handleAddClass = () => {
     if (!newClassName.trim()) return;
-
     setPendingClassName(newClassName);
     setNewClassName('');
     setShowAddClassModal(false);
     setShowImportState(true);
   };
 
+  // ✅ FIX 3: New classes get empty students array
   const handleManualInput = async () => {
-    const newClass: Class = {
+    const newClass: SafeClass = {
       id: Date.now(),
       name: pendingClassName,
-      students: [],
+      students: [],  // ✅ FIX: always empty array
       customColumns: [],
-      thresholds: undefined
+      thresholds: undefined,
     };
-
-    const updatedClasses = [...classes, newClass];
+    
+    const updatedClasses = [...classes, newClass] as SafeClass[];
     setClasses(updatedClasses);
     setActiveClassId(newClass.id);
     setShowImportState(false);
@@ -248,16 +252,17 @@ export default function DashboardPage() {
     }
   };
 
+  // ✅ FIX 4: Normalize imported classes too
   const handleImportComplete = async (data: any) => {
-    const newClass: Class = {
+    const newClass: SafeClass = {
       id: Date.now(),
       name: pendingClassName,
-      students: data.students || [],
+      students: data.students ?? [],  // ✅ FIX: guarantee array
       customColumns: data.customColumns || [],
-      thresholds: undefined
+      thresholds: undefined,
     };
-
-    const updatedClasses = [...classes, newClass];
+    
+    const updatedClasses = [...classes, newClass] as SafeClass[];
     setClasses(updatedClasses);
     setActiveClassId(newClass.id);
     setShowImportState(false);
@@ -280,7 +285,7 @@ export default function DashboardPage() {
 
   const handleDeleteClass = (classId: number, e: React.MouseEvent) => {
     e.stopPropagation();
-    const cls = classes.find(c => c.id === classId);
+    const cls = classes.find((c: SafeClass) => c.id === classId);
     if (cls) {
       setClassToDelete(cls);
       setShowDeleteClassModal(true);
@@ -289,17 +294,17 @@ export default function DashboardPage() {
 
   const confirmDeleteClass = async () => {
     if (!classToDelete) return;
-
-    const updatedClasses = classes.filter(c => c.id !== classToDelete.id);
+    
+    const updatedClasses = classes.filter((c: SafeClass) => c.id !== classToDelete.id) as SafeClass[];
     setClasses(updatedClasses);
 
-    // ✅ Update localStorage immediately
+    // Update localStorage immediately
     if (user) {
-      localStorage.setItem(`classes_${user.id}`, JSON.stringify(updatedClasses));
+      localStorage.setItem(`classes-${user.id}`, JSON.stringify(updatedClasses));
     }
 
     if (activeClassId === classToDelete.id) {
-      if (updatedClasses.length > 0) {
+      if (updatedClasses.length === 0) {
         setShowSnapshot(true);
         setActiveClassId(null);
       } else {
@@ -311,16 +316,15 @@ export default function DashboardPage() {
     // Delete from backend
     try {
       await classService.deleteClass(String(classToDelete.id));
-      setSyncError(''); // ✅ Clear any previous errors
+      setSyncError(null); // Clear any previous errors
     } catch (error) {
       console.error('Error deleting class:', error);
       setSyncError('Failed to sync deletion');
     }
-
+    
     setShowDeleteClassModal(false);
     setClassToDelete(null);
   };
-
 
   const handleClassSelect = (id: number) => {
     setActiveClassId(id);
@@ -329,12 +333,12 @@ export default function DashboardPage() {
   };
 
   const handleUpdateClassName = (classId: number, newName: string) => {
-    const updatedClasses = classes.map(cls =>
+    const updatedClasses = classes.map((cls: SafeClass) =>
       cls.id === classId ? { ...cls, name: newName } : cls
-    );
+    ) as SafeClass[];
     setClasses(updatedClasses);
-
-    const updatedClass = updatedClasses.find(c => c.id === classId);
+    
+    const updatedClass = updatedClasses.find((c: SafeClass) => c.id === classId);
     if (updatedClass) {
       saveClass(updatedClass);
     }
@@ -342,24 +346,22 @@ export default function DashboardPage() {
 
   const handleAddStudent = () => {
     if (!activeClassId) return;
-
     const newStudent: Student = {
       id: Date.now(),
       rollNo: '',
       name: '',
-      attendance: {}
+      attendance: {},
     };
-
-    const updatedClasses = classes.map(cls =>
+    
+    const updatedClasses = classes.map((cls: SafeClass) =>
       cls.id === activeClassId
-        ? { ...cls, students: [...cls.students, newStudent] }
+        ? { ...cls, students: [...(cls.students || []), newStudent] }
         : cls
-    );
-
+    ) as SafeClass[];
     setClasses(updatedClasses);
 
     // Sync to backend
-    const updatedClass = updatedClasses.find(c => c.id === activeClassId);
+    const updatedClass = updatedClasses.find((c: SafeClass) => c.id === activeClassId);
     if (updatedClass) {
       saveClass(updatedClass);
     }
@@ -367,24 +369,23 @@ export default function DashboardPage() {
 
   const handleUpdateStudent = (studentId: number, field: string, value: any) => {
     if (!activeClassId) return;
-
-    const updatedClasses = classes.map(cls =>
+    
+    const updatedClasses = classes.map((cls: SafeClass) =>
       cls.id === activeClassId
         ? {
-          ...cls,
-          students: cls.students.map(student =>
-            student.id === studentId
-              ? { ...student, [field]: value }
-              : student
-          )
-        }
+            ...cls,
+            students: cls.students?.map((student) =>
+              student.id === studentId
+                ? { ...student, [field]: value }
+                : student
+            ) || [],
+          }
         : cls
-    );
-
+    ) as SafeClass[];
     setClasses(updatedClasses);
 
     // Debounced sync to backend
-    const updatedClass = updatedClasses.find(c => c.id === activeClassId);
+    const updatedClass = updatedClasses.find((c: SafeClass) => c.id === activeClassId);
     if (updatedClass) {
       saveClass(updatedClass);
     }
@@ -392,16 +393,18 @@ export default function DashboardPage() {
 
   const handleDeleteStudent = (studentId: number) => {
     if (!activeClassId) return;
-
-    const updatedClasses = classes.map(cls =>
+    
+    const updatedClasses = classes.map((cls: SafeClass) =>
       cls.id === activeClassId
-        ? { ...cls, students: cls.students.filter(s => s.id !== studentId) }
+        ? {
+            ...cls,
+            students: cls.students?.filter((s) => s.id !== studentId) || [],
+          }
         : cls
-    );
-
+    ) as SafeClass[];
     setClasses(updatedClasses);
 
-    const updatedClass = updatedClasses.find(c => c.id === activeClassId);
+    const updatedClass = updatedClasses.find((c: SafeClass) => c.id === activeClassId);
     if (updatedClass) {
       saveClass(updatedClass);
     }
@@ -409,45 +412,42 @@ export default function DashboardPage() {
 
   const handleToggleAttendance = (studentId: number, day: number) => {
     if (!activeClassId) return;
-
+    
     const dateKey = `${currentYear}-${currentMonth + 1}-${day}`;
-
-    const updatedClasses = classes.map(cls =>
+    
+    const updatedClasses = classes.map((cls: SafeClass) =>
       cls.id === activeClassId
         ? {
-          ...cls,
-          students: cls.students.map(student => {
-            if (student.id === studentId) {
-              const currentStatus = student.attendance[dateKey];
-              let newStatus: 'P' | 'A' | 'L' | undefined;
-
-              if (!currentStatus) {
-                newStatus = 'P';
-              } else if (currentStatus === 'P') {
-                newStatus = 'A';
-              } else if (currentStatus === 'A') {
-                newStatus = 'L';
-              } else {
-                newStatus = undefined;
-              }
-
-              return {
-                ...student,
-                attendance: {
-                  ...student.attendance,
-                  [dateKey]: newStatus
+            ...cls,
+            students: cls.students?.map((student) => {
+              if (student.id === studentId) {
+                const currentStatus = student.attendance[dateKey];
+                let newStatus: 'P' | 'A' | 'L' | undefined;
+                if (!currentStatus) {
+                  newStatus = 'P';
+                } else if (currentStatus === 'P') {
+                  newStatus = 'A';
+                } else if (currentStatus === 'A') {
+                  newStatus = 'L';
+                } else {
+                  newStatus = undefined;
                 }
-              };
-            }
-            return student;
-          })
-        }
+                return {
+                  ...student,
+                  attendance: {
+                    ...student.attendance,
+                    [dateKey]: newStatus,
+                  },
+                };
+              }
+              return student;
+            }) || [],
+          }
         : cls
-    );
-
+    ) as SafeClass[];
     setClasses(updatedClasses);
 
-    const updatedClass = updatedClasses.find(c => c.id === activeClassId);
+    const updatedClass = updatedClasses.find((c: SafeClass) => c.id === activeClassId);
     if (updatedClass) {
       saveClass(updatedClass);
     }
@@ -455,26 +455,27 @@ export default function DashboardPage() {
 
   const handleAddColumn = () => {
     if (!newColumnLabel.trim() || !activeClassId) return;
-
+    
     const newColumn: CustomColumn = {
-      id: `col_${Date.now()}`,
+      id: `col-${Date.now()}`,
       label: newColumnLabel,
-      type: newColumnType
+      type: newColumnType,
     };
-
-    const updatedClasses = classes.map(cls =>
+    
+    const updatedClasses = classes.map((cls: SafeClass) =>
       cls.id === activeClassId
-        ? { ...cls, customColumns: [...cls.customColumns, newColumn] }
+        ? {
+            ...cls,
+            customColumns: [...cls.customColumns, newColumn],
+          }
         : cls
-    );
-
+    ) as SafeClass[];
     setClasses(updatedClasses);
-
     setNewColumnLabel('');
     setNewColumnType('text');
     setShowAddColumnModal(false);
 
-    const updatedClass = updatedClasses.find(c => c.id === activeClassId);
+    const updatedClass = updatedClasses.find((c: SafeClass) => c.id === activeClassId);
     if (updatedClass) {
       saveClass(updatedClass);
     }
@@ -482,23 +483,22 @@ export default function DashboardPage() {
 
   const handleDeleteColumn = (columnId: string) => {
     if (!activeClassId) return;
-
-    const updatedClasses = classes.map(cls =>
+    
+    const updatedClasses = classes.map((cls: SafeClass) =>
       cls.id === activeClassId
         ? {
-          ...cls,
-          customColumns: cls.customColumns.filter(col => col.id !== columnId),
-          students: cls.students.map(student => {
-            const { [columnId]: _, ...rest } = student;
-            return rest as Student;
-          })
-        }
+            ...cls,
+            customColumns: cls.customColumns.filter((col) => col.id !== columnId),
+            students: cls.students?.map((student) => {
+              const { [columnId]: _, ...rest } = student;
+              return rest as Student;
+            }) || [],
+          }
         : cls
-    );
-
+    ) as SafeClass[];
     setClasses(updatedClasses);
 
-    const updatedClass = updatedClasses.find(c => c.id === activeClassId);
+    const updatedClass = updatedClasses.find((c: SafeClass) => c.id === activeClassId);
     if (updatedClass) {
       saveClass(updatedClass);
     }
@@ -515,11 +515,9 @@ export default function DashboardPage() {
     );
   }
 
-  if (!isAuthenticated) {
-    return null;
-  }
+  if (!isAuthenticated) return null;
 
-  const activeClass = classes.find(c => c.id === activeClassId);
+  const activeClass = classes.find((c: SafeClass) => c.id === activeClassId);
 
   return (
     <div className="min-h-screen h-screen bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50 flex flex-col overflow-hidden">
@@ -533,42 +531,40 @@ export default function DashboardPage() {
             >
               <Menu className="w-5 h-5 text-slate-600" />
             </button>
-            <div className="flex items-center gap-2">
-              <div className="w-10 h-10 rounded-xl flex items-center justify-center shadow-md">
-                <img src="/logo.png" alt="Lernova Attendsheets Logo" className="w-10 h-10" />
-              </div>
-              <div>
-                <h1 className="text-xl font-bold text-emerald-900">Lernova Attendsheets</h1>
-                {syncing && (
-                  <p className="text-xs text-blue-600">Syncing...</p>
-                )}
-                {syncError && (
-                  <p className="text-xs text-amber-600">{syncError}</p>
-                )}
-                {!syncing && !syncError && showSnapshot && classes.length > 0 && (
-                  <p className="text-xs text-slate-600">Dashboard Overview</p>
-                )}
-                {showAllClasses && (
-                  <p className="text-xs text-slate-600">All Classes Overview</p>
-                )}
-                {showImportState && (
-                  <p className="text-xs text-slate-600">Setting up new class</p>
-                )}
-              </div>
-            </div>
           </div>
 
-          <div className="flex items-center gap-4">
-            {activeClass && !showAllClasses && !showSnapshot && !showImportState && (
-              <MonthYearSelector
-                currentMonth={currentMonth}
-                currentYear={currentYear}
-                onMonthChange={setCurrentMonth}
-                onYearChange={setCurrentYear}
-              />
-            )}
+          <div className="flex items-center gap-2">
+            <img
+              src="/logo.png"
+              alt="Lernova Attendsheets Logo"
+              className="w-10 h-10"
+            />
+          </div>
 
-            {classes.length > 0 && !showSnapshot && !showImportState && (
+          <div className="flex items-center gap-3 border-l border-emerald-200 pl-4">
+            <div className="flex items-center gap-2">
+              {syncing && (
+                <p className="text-xs text-blue-600">Syncing...</p>
+              )}
+              {syncError && (
+                <p className="text-xs text-amber-600">{syncError}</p>
+              )}
+              {!syncing && !syncError && (
+                <>
+                  {showSnapshot && classes.length === 0 && (
+                    <p className="text-xs text-slate-600">Dashboard Overview</p>
+                  )}
+                  {showAllClasses && (
+                    <p className="text-xs text-slate-600">All Classes Overview</p>
+                  )}
+                  {showImportState && (
+                    <p className="text-xs text-slate-600">Setting up new class</p>
+                  )}
+                </>
+              )}
+            </div>
+
+            {!showImportState && !activeClass && classes.length === 0 ? (
               <button
                 onClick={() => {
                   setShowSnapshot(true);
@@ -580,28 +576,35 @@ export default function DashboardPage() {
                 <LayoutDashboard className="w-4 h-4" />
                 Dashboard
               </button>
-            )}
+            ) : null}
 
-            <div className="flex items-center gap-3 border-l border-emerald-200 pl-4">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 bg-gradient-to-br from-emerald-500 to-teal-600 rounded-lg flex items-center justify-center">
-                  <User className="w-5 h-5 text-white" />
-                </div>
-                <div className="hidden md:block">
-                  <p className="text-sm font-medium text-slate-900">{user?.name}</p>
-                  <p className="text-xs text-slate-600">{user?.email}</p>
-                </div>
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 bg-gradient-to-br from-emerald-500 to-teal-600 rounded-lg flex items-center justify-center">
+                <User className="w-5 h-5 text-white" />
+              </div>
+              <div className="hidden md:block">
+                <p className="text-sm font-medium text-slate-900">{user?.name}</p>
+                <p className="text-xs text-slate-600">{user?.email}</p>
               </div>
             </div>
           </div>
         </div>
+
+        {!showImportState && activeClass && !showAllClasses && !showSnapshot ? (
+          <MonthYearSelector
+            currentMonth={currentMonth}
+            currentYear={currentYear}
+            onMonthChange={setCurrentMonth}
+            onYearChange={setCurrentYear}
+          />
+        ) : null}
       </header>
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden min-h-0">
         <Sidebar
           collapsed={sidebarCollapsed}
-          classes={classes}
+          classes={classes as Class[]}
           activeClassId={activeClassId}
           onClassSelect={handleClassSelect}
           onAddClass={() => setShowAddClassModal(true)}
@@ -634,7 +637,7 @@ export default function DashboardPage() {
             <EmptyState onCreateClass={() => setShowAddClassModal(true)} />
           ) : showSnapshot ? (
             <SnapshotView
-              classes={classes}
+              classes={classes as Class[]}
               currentMonth={currentMonth}
               currentYear={currentYear}
               onClassSelect={handleClassSelect}
@@ -643,7 +646,7 @@ export default function DashboardPage() {
             />
           ) : showAllClasses ? (
             <AllClassesView
-              classes={classes}
+              classes={classes as Class[]}
               onBack={() => setShowAllClasses(false)}
               onClassSelect={handleClassSelect}
               currentMonth={currentMonth}
@@ -652,7 +655,7 @@ export default function DashboardPage() {
             />
           ) : activeClass ? (
             <AttendanceSheet
-              activeClass={activeClass}
+              activeClass={activeClass as Class}
               currentMonth={currentMonth}
               currentYear={currentYear}
               onAddStudent={handleAddStudent}
@@ -710,17 +713,19 @@ export default function DashboardPage() {
         <QRAttendanceModal
           classId={activeClass.id}
           className={activeClass.name}
-          totalStudents={activeClass.students.length}
+          totalStudents={(activeClass.students || []).length}
           onClose={() => setShowQRModal(false)}
         />
       )}
 
-      {settingsClassId && (
+      {settingsClassId !== null && (
         <ClassThresholdSettings
           isOpen={showThresholdSettings}
-          currentClass={classes.find(c => c.id === settingsClassId)!}
-          allClasses={classes}
-          thresholds={classes.find(c => c.id === settingsClassId)?.thresholds || defaultThresholds}
+          currentClass={classes.find((c: SafeClass) => c.id === settingsClassId!)!}
+          allClasses={classes as Class[]}
+          thresholds={
+            classes.find((c: SafeClass) => c.id === settingsClassId!)?.thresholds || defaultThresholds
+          }
           onClose={() => {
             setShowThresholdSettings(false);
             setSettingsClassId(null);
