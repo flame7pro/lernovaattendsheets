@@ -167,26 +167,40 @@ def student_from_row(row: dict) -> Optional[Dict[str, Any]]:
 
 
 def get_teacher_by_email(email: str) -> Optional[Dict[str, Any]]:
-    res = (
-        supabase
-        .table("teachers")
-        .select("*")
-        .eq("email", email)
-        .maybe_single()
-        .execute()
-    )
-    return teacher_from_row(res.data) if res.data else None
+    try:
+        res = (
+            supabase
+            .table("teachers")
+            .select("*")
+            .eq("email", email)
+            .maybe_single()
+            .execute()
+        )
+        if res is None:
+            print(f"ERROR: Supabase execute() returned None for email {email}")
+            return None
+        return teacher_from_row(res.data) if res.data else None
+    except Exception as e:
+        print(f"ERROR in get_teacher_by_email: {e}")
+        return None
 
 def get_student_by_email(email: str) -> Optional[Dict[str, Any]]:
-    res = (
-        supabase
-        .table("students")
-        .select("*")
-        .eq("email", email)
-        .maybe_single()
-        .execute()
-    )
-    return student_from_row(res.data) if res.data else None
+    try:
+        res = (
+            supabase
+            .table("students")
+            .select("*")
+            .eq("email", email)
+            .maybe_single()
+            .execute()
+        )
+        if res is None:
+            print(f"ERROR: Supabase execute() returned None for email {email}")
+            return None
+        return student_from_row(res.data) if res.data else None
+    except Exception as e:
+        print(f"ERROR in get_student_by_email: {e}")
+        return None
 
 def get_password_hash(password: str) -> str:
     """Hash a password using SHA-256"""
