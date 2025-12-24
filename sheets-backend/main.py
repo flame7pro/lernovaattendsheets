@@ -16,6 +16,7 @@ import string
 from dotenv import load_dotenv
 import ssl
 from supabase_client import supabase
+import traceback
 
 
 load_dotenv()
@@ -556,15 +557,15 @@ async def signup(request: SignupRequest):
             if email_sent
             else f"Code: {code}",
         }
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Signup error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Signup failed: {str(e)}",
-        )
-
+        except HTTPException:
+            raise
+        except Exception as e:
+            print("Signup error:", e)
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Signup failed: {str(e)}",
+            )
 
 @app.post("/auth/verify-email", response_model=TokenResponse)
 async def verify_email(request: VerifyEmailRequest):
