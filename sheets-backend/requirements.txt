@@ -4,3 +4,4 @@ pydantic
 pydantic[email]
 python-dotenv
 PyJWT
+supabase-py

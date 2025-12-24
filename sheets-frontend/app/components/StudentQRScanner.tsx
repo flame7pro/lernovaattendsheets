@@ -88,26 +88,26 @@ export const StudentQRScanner: React.FC<StudentQRScannerProps> = ({
         setProcessing(true);
 
         try {
-            let class_id: string;
+            let classId: string;
             let code: string;
 
             // Try JSON first
             try {
                 const parsed = JSON.parse(decodedText);
-                class_id = parsed.class_id;
+                classId = parsed.class_id;
                 code = parsed.code;
             } catch {
                 // Fallback: assume format "classId|code"
                 const parts = decodedText.split('|');
                 if (parts.length === 2) {
-                    class_id = parts[0];
+                    classId = parts[0];
                     code = parts[1];
                 } else {
                     throw new Error('Invalid QR content');
                 }
             }
 
-            if (class_id !== selectedClass) {
+            if (classId !== selectedClass) {
                 setResult({
                     success: false,
                     message: 'This QR code is for a different class!',
@@ -129,12 +129,16 @@ export const StudentQRScanner: React.FC<StudentQRScannerProps> = ({
                 return;
             }
 
+            const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
             const response = await fetch(
-                `${process.env.NEXT_PUBLIC_API_URL}/qr/scan?class_id=${class_id}&qr_code=${code}`,
-                {
-                    method: 'POST',
-                    headers: { Authorization: `Bearer ${token}` },
-                }
+            `${baseUrl}/qr/scan?classid=${classId}&qrcode=${encodeURIComponent(code)}`,
+            {
+                method: "POST",
+                headers: {
+                Authorization: `Bearer ${token}`,
+                },
+            }
             );
 
             const data = await response.json();

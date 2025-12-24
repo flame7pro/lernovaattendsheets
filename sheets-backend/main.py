@@ -15,16 +15,17 @@ import random
 import string
 from dotenv import load_dotenv
 import ssl
-from db_manager import DatabaseManager
+from supabase_client import supabase
+
 
 load_dotenv()
 
+
 app = FastAPI(title="Lernova Attendsheets API")
 
-# Initialize Database Manager
-db = DatabaseManager(base_dir="data")
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
 
 # CORS Configuration
 app.add_middleware(
@@ -39,10 +40,12 @@ app.add_middleware(
 # Security
 security = HTTPBearer()
 
+
 # Configuration
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-this-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
+
 
 # Email Configuration
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
@@ -51,12 +54,14 @@ SMTP_USERNAME = os.getenv("SMTP_USERNAME")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 FROM_EMAIL = os.getenv("FROM_EMAIL", SMTP_USERNAME)
 
+
 # Temporary storage for verification codes (in production, use Redis or similar)
 verification_codes = {}
 password_reset_codes = {}
 
 
 # ==================== PYDANTIC MODELS ====================
+
 
 class SignupRequest(BaseModel):
     email: EmailStr
@@ -69,11 +74,13 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str
 
+
 class StudentEnrollmentRequest(BaseModel):
     class_id: str
     name: str
     rollNo: str
     email: EmailStr
+
 
 class VerifyEmailRequest(BaseModel):
     email: EmailStr
@@ -124,10 +131,50 @@ class ContactRequest(BaseModel):
     subject: str
     message: str
 
+
 class ResendVerificationRequest(BaseModel):
     email: EmailStr
 
+
 # ==================== HELPER FUNCTIONS ====================
+
+
+def teacher_from_row(row: dict) -> Optional[Dict[str, Any]]:
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "name": row["name"],
+        "password": row["password"],
+        "verified": row.get("verified", True),
+        "role": row.get("role", "teacher"),
+        "overview": row.get("overview") or {},
+    }
+
+
+def student_from_row(row: dict) -> Optional[Dict[str, Any]]:
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "name": row["name"],
+        "password": row["password"],
+        "verified": row.get("verified", True),
+        "role": row.get("role", "student"),
+    }
+
+
+def get_teacher_by_email(email: str) -> Optional[Dict[str, Any]]:
+    res = supabase.table("teachers").select("*").eq("email", email).maybe_single()
+    return teacher_from_row(res.data) if res.data else None
+
+
+def get_student_by_email(email: str) -> Optional[Dict[str, Any]]:
+    res = supabase.table("students").select("*").eq("email", email).maybe_single()
+    return student_from_row(res.data) if res.data else None
+
 
 def get_password_hash(password: str) -> str:
     """Hash a password using SHA-256"""
@@ -271,6 +318,7 @@ def send_verification_email(to_email: str, code: str, name: str):
         print(f"Error sending email: {e}")
         return False
 
+
 def send_password_reset_email(to_email: str, code: str, name: str):
     """Send password reset email"""
     try:
@@ -385,6 +433,7 @@ def send_password_reset_email(to_email: str, code: str, name: str):
         print(f"Error sending reset email: {e}")
         return False
 
+
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Verify JWT token and return user email"""
     try:
@@ -402,7 +451,7 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token has expired",
         )
-    except jwt.PyJWTError:  # ✅ FIXED - Use PyJWTError instead of JWTError
+    except jwt.PyJWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
@@ -411,58 +460,75 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
 
 # ==================== API ENDPOINTS ====================
 
+
 @app.get("/")
 def read_root():
     return {
         "message": "Lernova Attendsheets API",
         "version": "1.0.0",
         "status": "online",
-        "database": "file-based"
+        "database": "supabase"
     }
 
 
 @app.get("/stats")
-def get_stats():
-    """Get database statistics"""
-    return db.get_database_stats()
+async def get_stats():
+    """Get database statistics from Supabase"""
+    try:
+        teachers_res = supabase.table("teachers").select("id", count="exact").execute()
+        students_res = supabase.table("students").select("id", count="exact").execute()
+        classes_res = supabase.table("classes").select("id", count="exact").execute()
+        
+        return {
+            "total_teachers": teachers_res.count or 0,
+            "total_students": students_res.count or 0,
+            "total_classes": classes_res.count or 0,
+            "database": "supabase"
+        }
+    except Exception as e:
+        print(f"Error fetching stats: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch statistics"
+        )
 
-
-# ==================== AUTH ENDPOINTS ====================
+# ==================== AUTH ENDPOINTS (TEACHER + SHARED) ====================
 
 @app.post("/auth/signup")
 async def signup(request: SignupRequest):
-    """Sign up a new user"""
+    """Sign up a new teacher"""
     try:
-        # Check if user already exists
-        existing_user = db.get_user_by_email(request.email)
+        existing_user = get_teacher_by_email(request.email)
         if existing_user:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="User with this email already exists"
+                detail="User with this email already exists",
             )
-        
+
         if len(request.password) < 8:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Password must be at least 8 characters long"
+                detail="Password must be at least 8 characters long",
             )
-        
+
         code = generate_verification_code()
         print(f"Verification code for {request.email}: {code}")
-        
-        # Store verification code temporarily
+
         verification_codes[request.email] = {
             "code": code,
             "name": request.name,
             "password": get_password_hash(request.password),
-            "expires_at": (datetime.utcnow() + timedelta(minutes=15)).isoformat()
+            "role": "teacher",
+            "expires_at": (datetime.utcnow() + timedelta(minutes=15)).isoformat(),
         }
-        
+
         email_sent = send_verification_email(request.email, code, request.name)
-        
+
         return {
             "success": True,
-            "message": "Verification code sent to your email" if email_sent else f"Code: {code}"
+            "message": "Verification code sent to your email"
+            if email_sent
+            else f"Code: {code}",
         }
     except HTTPException:
         raise
@@ -470,750 +536,9 @@ async def signup(request: SignupRequest):
         print(f"Signup error: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Signup failed: {str(e)}"
+            detail=f"Signup failed: {str(e)}",
         )
 
-
-@app.post("/auth/verify-email", response_model=TokenResponse)
-async def verify_email(request: VerifyEmailRequest):
-    """Verify email with code"""
-    try:
-        if request.email not in verification_codes:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No verification code found"
-            )
-        
-        stored_data = verification_codes[request.email]
-        expires_at = datetime.fromisoformat(stored_data["expires_at"])
-        
-        if datetime.utcnow() > expires_at:
-            del verification_codes[request.email]
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Verification code expired"
-            )
-        
-        if stored_data["code"] != request.code:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid verification code"
-            )
-        
-        # Create user in database
-        user_id = f"user_{int(datetime.utcnow().timestamp())}"
-        user_data = db.create_user(
-            user_id=user_id,
-            email=request.email,
-            name=stored_data["name"],
-            password_hash=stored_data["password"]
-        )
-        
-        # Clean up verification code
-        del verification_codes[request.email]
-        
-        # Create access token
-        access_token = create_access_token(
-            data={"sub": request.email},
-            expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        )
-        
-        return TokenResponse(
-            access_token=access_token,
-            user=UserResponse(id=user_id, email=request.email, name=stored_data["name"])
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Verification error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Verification failed: {str(e)}"
-        )
-
-
-@app.post("/auth/login", response_model=TokenResponse)
-async def login(request: LoginRequest):
-    """Login user"""
-    user = db.get_user_by_email(request.email)
-    
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password"
-        )
-    
-    if not verify_password(request.password, user["password"]):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password"
-        )
-    
-    access_token = create_access_token(
-        data={"sub": request.email},
-        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    )
-    
-    return TokenResponse(
-        access_token=access_token,
-        user=UserResponse(id=user["id"], email=user["email"], name=user["name"])
-    )
-
-@app.post("/auth/resend-verification")
-async def resend_verification(request: ResendVerificationRequest):
-    """Resend verification code"""
-    try:
-        # Check if there's already a pending verification for this email
-        if request.email not in verification_codes:
-            # Check if user already exists
-            existing_user = db.get_user_by_email(request.email)
-            if existing_user:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Email already verified"
-                )
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No pending verification found for this email"
-                )
-        
-        # Get the stored data
-        stored_data = verification_codes[request.email]
-        
-        # Generate new code
-        code = generate_verification_code()
-        print(f"New verification code for {request.email}: {code}")
-        
-        # Update the stored verification code with new code and expiry
-        verification_codes[request.email] = {
-            "code": code,
-            "name": stored_data["name"],
-            "password": stored_data["password"],
-            "expires_at": (datetime.utcnow() + timedelta(minutes=15)).isoformat()
-        }
-        
-        # Send new verification email
-        email_sent = send_verification_email(request.email, code, stored_data["name"])
-        
-        return {
-            "success": True,
-            "message": "New verification code sent to your email" if email_sent else f"Code: {code}"
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Resend verification error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to resend verification code: {str(e)}"
-        )
-
-@app.post("/auth/request-password-reset")
-async def request_password_reset(request: PasswordResetRequest):
-    """Request password reset code"""
-    user = db.get_user_by_email(request.email)
-    
-    if not user:
-        # Don't reveal if email exists
-        return {"success": True, "message": "If account exists, reset code sent"}
-    
-    code = generate_verification_code()
-    print(f"Password reset code for {request.email}: {code}")
-    
-    password_reset_codes[request.email] = {
-        "code": code,
-        "expires_at": (datetime.utcnow() + timedelta(minutes=15)).isoformat()
-    }
-    
-    send_password_reset_email(request.email, code, user["name"])
-    
-    return {"success": True, "message": "Reset code sent to your email"}
-
-
-@app.post("/auth/reset-password")
-async def reset_password(request: VerifyResetCodeRequest):
-    """Reset password with code"""
-    if request.email not in password_reset_codes:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No reset code found"
-        )
-    
-    stored_data = password_reset_codes[request.email]
-    expires_at = datetime.fromisoformat(stored_data["expires_at"])
-    
-    if datetime.utcnow() > expires_at:
-        del password_reset_codes[request.email]
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Reset code expired"
-        )
-    
-    if stored_data["code"] != request.code:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid reset code"
-        )
-    
-    if len(request.new_password) < 8:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Password must be at least 8 characters"
-        )
-    
-    # Update password in database
-    user = db.get_user_by_email(request.email)
-    if user:
-        db.update_user(user["id"], password=get_password_hash(request.new_password))
-    
-    del password_reset_codes[request.email]
-    
-    return {"success": True, "message": "Password reset successfully"}
-
-
-@app.post("/auth/change-password")
-async def change_password(request: ChangePasswordRequest, email: str = Depends(verify_token)):
-    """Change password for logged-in user - supports both teachers and students"""
-    if email not in password_reset_codes:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No verification code found")
-    
-    stored_data = password_reset_codes[email]
-    expires_at = datetime.fromisoformat(stored_data["expires_at"])
-    
-    if datetime.utcnow() > expires_at:
-        del password_reset_codes[email]
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Verification code expired")
-    
-    if stored_data["code"] != request.code:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid verification code")
-    
-    if len(request.new_password) < 8:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must be at least 8 characters")
-    
-    # Try to find as teacher first
-    user = db.get_user_by_email(email)
-    if user:
-        db.update_user(user["id"], password=get_password_hash(request.new_password))
-        del password_reset_codes[email]
-        return {"success": True, "message": "Password changed successfully"}
-    
-    # Try to find as student
-    student = db.get_student_by_email(email)
-    if student:
-        db.update_student(student["id"], {"password": get_password_hash(request.new_password)})
-        del password_reset_codes[email]
-        return {"success": True, "message": "Password changed successfully"}
-    
-    # Not found in either
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-
-
-@app.post("/auth/request-change-password")
-async def request_change_password(email: str = Depends(verify_token)):
-    """Request verification code for password change - supports both teachers and students"""
-    # Try to find as teacher first
-    user = db.get_user_by_email(email)
-    if user:
-        code = generate_verification_code()
-        print(f"Password change code for {email}: {code}")
-        
-        password_reset_codes[email] = {
-            "code": code,
-            "expires_at": (datetime.utcnow() + timedelta(minutes=15)).isoformat()
-        }
-        
-        send_password_reset_email(email, code, user["name"])
-        return {"success": True, "message": "Verification code sent"}
-    
-    # Try to find as student
-    student = db.get_student_by_email(email)
-    if student:
-        code = generate_verification_code()
-        print(f"Password change code for {email}: {code}")
-        
-        password_reset_codes[email] = {
-            "code": code,
-            "expires_at": (datetime.utcnow() + timedelta(minutes=15)).isoformat()
-        }
-        
-        send_password_reset_email(email, code, student["name"])
-        return {"success": True, "message": "Verification code sent"}
-    
-    # Not found in either
-    raise HTTPException(status_code=404, detail="User not found")
-
-
-@app.put("/auth/update-profile")
-async def update_profile(request: UpdateProfileRequest, email: str = Depends(verify_token)):
-    """Update user profile - supports both teachers and students"""
-    # Try to find as teacher first
-    user = db.get_user_by_email(email)
-    if user:
-        # It's a teacher
-        updated_user = db.update_user(user["id"], name=request.name)
-        return UserResponse(id=updated_user["id"], email=updated_user["email"], name=updated_user["name"])
-    
-    # Try to find as student
-    student = db.get_student_by_email(email)
-    if student:
-        # It's a student
-        updated_student = db.update_student(student["id"], {"name": request.name})
-        return UserResponse(id=updated_student["id"], email=updated_student["email"], name=updated_student["name"])
-    
-    # Not found in either
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-
-
-@app.post("/auth/logout")
-async def logout(email: str = Depends(verify_token)):
-    """Logout user"""
-    return {"success": True, "message": "Logged out successfully"}
-
-
-@app.get("/auth/me", response_model=UserResponse)
-async def get_current_user(email: str = Depends(verify_token)):
-    """Get current user info"""
-    user = db.get_user_by_email(email)
-    
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-    
-    return UserResponse(id=user["id"], email=user["email"], name=user["name"])
-
-
-@app.delete("/auth/delete-account")
-async def delete_account(email: str = Depends(verify_token)):
-    """Delete user account and all associated data"""
-    try:
-        user = db.get_user_by_email(email)
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
-            )
-        
-        user_id = user["id"]
-        
-        # Use the database manager's delete method
-        success = db.delete_user(user_id)
-        
-        if not success:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to delete account"
-            )
-        
-        return {
-            "success": True,
-            "message": "Account deleted successfully"
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Delete account error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to delete account"
-        )
-
-# ==================== STUDENT AUTH ENDPOINTS ====================
-
-@app.post("/auth/student/signup")
-async def student_signup(request: SignupRequest):
-    """Sign up a new student"""
-    try:
-        # Check if student already exists
-        existing_student = db.get_student_by_email(request.email)
-        if existing_student:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Student with this email already exists"
-            )
-        
-        # Also check teachers to prevent email conflicts
-        existing_teacher = db.get_user_by_email(request.email)
-        if existing_teacher:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="This email is already registered as a teacher"
-            )
-        
-        if len(request.password) < 8:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Password must be at least 8 characters long"
-            )
-        
-        code = generate_verification_code()
-        print(f"Verification code for {request.email}: {code}")
-        
-        # Store verification code temporarily
-        verification_codes[request.email] = {
-            "code": code,
-            "name": request.name,
-            "password": get_password_hash(request.password),
-            "role": "student",
-            "expires_at": (datetime.utcnow() + timedelta(minutes=15)).isoformat()
-        }
-        
-        email_sent = send_verification_email(request.email, code, request.name)
-        
-        return {
-            "success": True,
-            "message": "Verification code sent to your email" if email_sent else f"Code: {code}"
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Student signup error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Signup failed: {str(e)}"
-        )
-
-
-@app.post("/auth/student/verify-email", response_model=TokenResponse)
-async def verify_student_email(request: VerifyEmailRequest):
-    """Verify student email with code"""
-    try:
-        if request.email not in verification_codes:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No verification code found"
-            )
-        
-        stored_data = verification_codes[request.email]
-        
-        # Ensure this is a student verification
-        if stored_data.get("role") != "student":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid verification attempt"
-            )
-        
-        expires_at = datetime.fromisoformat(stored_data["expires_at"])
-        
-        if datetime.utcnow() > expires_at:
-            del verification_codes[request.email]
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Verification code expired"
-            )
-        
-        if stored_data["code"] != request.code:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid verification code"
-            )
-        
-        # Create student in database
-        student_id = f"student_{int(datetime.utcnow().timestamp())}"
-        user_data = db.create_student(
-            student_id=student_id,
-            email=request.email,
-            name=stored_data["name"],
-            password_hash=stored_data["password"]
-        )
-        
-        # Clean up verification code
-        del verification_codes[request.email]
-        
-        # Create access token
-        access_token = create_access_token(
-            data={"sub": request.email, "role": "student"},
-            expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        )
-        
-        return TokenResponse(
-            access_token=access_token,
-            user=UserResponse(id=student_id, email=request.email, name=stored_data["name"])
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Student verification error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Verification failed: {str(e)}"
-        )
-
-
-@app.post("/auth/student/login", response_model=TokenResponse)
-async def student_login(request: LoginRequest):
-    """Login student"""
-    user = db.get_student_by_email(request.email)
-    
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password"
-        )
-    
-    if not verify_password(request.password, user["password"]):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password"
-        )
-    
-    access_token = create_access_token(
-        data={"sub": request.email, "role": "student"},
-        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    )
-    
-    return TokenResponse(
-        access_token=access_token,
-        user=UserResponse(id=user["id"], email=user["email"], name=user["name"])
-    )
-
-@app.delete("/auth/student/delete-account")
-async def delete_student_account(email: str = Depends(verify_token)):
-    """Delete student account and all associated data"""
-    try:
-        print(f"API: Delete student account request for {email}")
-        
-        # Get student data
-        student = db.get_student_by_email(email)
-        if not student:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Student not found"
-            )
-        
-        student_id = student["id"]
-        
-        # Use the database manager's delete method
-        success = db.delete_student(student_id)
-        if not success:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to delete student account"
-            )
-        
-        print(f"API: Student account deleted successfully")
-        return {"success": True, "message": "Student account deleted successfully"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"API: Delete student account error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to delete student account"
-        )
-
-# ==================== STUDENT ENROLLMENT ENDPOINTS ====================
-
-@app.post("/student/enroll")
-async def enroll_in_class(request: StudentEnrollmentRequest, email: str = Depends(verify_token)):
-    """
-    Enroll student in a class.
-    - If student was previously enrolled and unenrolled, restore their data
-    - If new enrollment, create new record
-    - Email must match logged-in user (security)
-    """
-    try:
-        # Get student data
-        student = db.get_student_by_email(email)
-        if not student:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
-        
-        student_id = student['id']
-        
-        # SECURITY: Ensure the email in request matches logged-in user
-        if request.email != email:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You must use your registered email"
-            )
-        
-        # Prepare student info
-        student_info = {
-            "name": request.name,
-            "rollNo": request.rollNo,
-            "email": request.email
-        }
-        
-        # Enroll student - this handles re-enrollment with data preservation
-        enrollment = db.enroll_student(student_id, request.class_id, student_info)
-        
-        return {
-            "success": True,
-            "message": enrollment.get("message", "Successfully enrolled in class"),
-            "enrollment": enrollment
-        }
-        
-    except ValueError as e:
-        error_message = str(e)
-        print(f"[ENROLL_ENDPOINT] ValueError: {error_message}")
-        
-        if "already enrolled" in error_message.lower():
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error_message)
-        else:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error_message)
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"[ENROLL_ENDPOINT] ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to enroll in class"
-        )
-    
-    
-@app.delete("/student/unenroll/{class_id}")
-async def unenroll_from_class(class_id: str, email: str = Depends(verify_token)):
-    """Unenroll student from a class"""
-    try:
-        # Get student data
-        student = db.get_student_by_email(email)
-        if not student:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Student not found"
-            )
-        
-        # Verify class exists
-        class_data = db.get_class_by_id(class_id)
-        if not class_data:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Class not found"
-            )
-        
-        # Unenroll student
-        success = db.unenroll_student(student["id"], class_id)
-        
-        if not success:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="You are not enrolled in this class"
-            )
-        
-        return {
-            "success": True,
-            "message": "Successfully unenrolled from class"
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Unenrollment error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to unenroll from class: {str(e)}"
-        )
-
-@app.get("/student/classes")
-async def get_student_classes(email: str = Depends(verify_token)):
-    """Get all classes a student is enrolled in"""
-    try:
-        student = db.get_student_by_email(email)
-        if not student:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Student not found"
-            )
-        
-        enrolled_classes = db.get_student_enrollments(student["id"])
-        
-        # Get detailed info for each class
-        classes_details = []
-        for enrollment in enrolled_classes:
-            class_details = db.get_student_class_details(student["id"], enrollment["class_id"])
-            if class_details:
-                classes_details.append(class_details)
-        
-        return {
-            "classes": classes_details
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error fetching student classes: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to fetch classes"
-        )
-
-
-@app.get("/student/class/{class_id}")
-async def get_student_class_detail(class_id: str, email: str = Depends(verify_token)):
-    """Get detailed information about a specific class"""
-    try:
-        student = db.get_student_by_email(email)
-        if not student:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Student not found"
-            )
-        
-        class_details = db.get_student_class_details(student["id"], class_id)
-        if not class_details:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Class not found or student not enrolled"
-            )
-        
-        return {
-            "class": class_details
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error fetching class details: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to fetch class details"
-        )
-
-
-@app.get("/class/verify/{class_id}")
-async def verify_class_exists(class_id: str):
-    """Verify if a class exists (public endpoint for enrollment)"""
-    try:
-        class_data = db.get_class_by_id(class_id)
-        if not class_data:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Class not found"
-            )
-        
-        # Get teacher info
-        teacher_id = class_data.get("teacher_id")
-        teacher_name = "Unknown"
-        if teacher_id:
-            teacher = db.get_user(teacher_id)
-            if teacher:
-                teacher_name = teacher.get("name", "Unknown")
-        
-        return {
-            "exists": True,
-            "class_name": class_data.get("name", ""),
-            "teacher_name": teacher_name,
-            "class_id": class_id
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error verifying class: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to verify class"
-        )
-
-
-# 5. UPDATE your existing verify-email endpoint to handle both roles
-# REPLACE your existing @app.post("/auth/verify-email") with this:
 
 @app.post("/auth/verify-email", response_model=TokenResponse)
 async def verify_email(request: VerifyEmailRequest):
@@ -1222,66 +547,368 @@ async def verify_email(request: VerifyEmailRequest):
         if request.email not in verification_codes:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No verification code found"
+                detail="No verification code found",
             )
-        
+
         stored_data = verification_codes[request.email]
         expires_at = datetime.fromisoformat(stored_data["expires_at"])
-        
+
         if datetime.utcnow() > expires_at:
             del verification_codes[request.email]
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Verification code expired"
+                detail="Verification code expired",
             )
-        
+
         if stored_data["code"] != request.code:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid verification code"
+                detail="Invalid verification code",
             )
-        
-        # Get role from stored data (default to teacher for backward compatibility)
+
         role = stored_data.get("role", "teacher")
-        
-        # Create user based on role
+
         if role == "student":
             user_id = f"student_{int(datetime.utcnow().timestamp())}"
-            user_data = db.create_student(
-                student_id=user_id,
-                email=request.email,
-                name=stored_data["name"],
-                password_hash=stored_data["password"]
-            )
+            row = {
+                "id": user_id,
+                "email": request.email,
+                "name": stored_data["name"],
+                "password": stored_data["password"],
+                "verified": True,
+                "role": "student",
+                "created_at": datetime.utcnow().isoformat(),
+            }
+            supabase.table("students").insert(row).execute()
         else:
             user_id = f"user_{int(datetime.utcnow().timestamp())}"
-            user_data = db.create_user(
-                user_id=user_id,
-                email=request.email,
-                name=stored_data["name"],
-                password_hash=stored_data["password"]
-            )
-        
-        # Clean up verification code
+            row = {
+                "id": user_id,
+                "email": request.email,
+                "name": stored_data["name"],
+                "password": stored_data["password"],
+                "verified": True,
+                "role": "teacher",
+                "overview": {
+                    "total_classes": 0,
+                    "total_students": 0,
+                    "last_updated": datetime.utcnow().isoformat(),
+                },
+                "created_at": datetime.utcnow().isoformat(),
+            }
+            supabase.table("teachers").insert(row).execute()
+
         del verification_codes[request.email]
-        
-        # Create access token with role
+
         access_token = create_access_token(
             data={"sub": request.email, "role": role},
-            expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+            expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
         )
-        
+
         return TokenResponse(
             access_token=access_token,
-            user=UserResponse(id=user_id, email=request.email, name=stored_data["name"])
+            user=UserResponse(
+                id=user_id, email=request.email, name=stored_data["name"]
+            ),
         )
+
     except HTTPException:
         raise
     except Exception as e:
         print(f"Verification error: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Verification failed: {str(e)}"
+            detail=f"Verification failed: {str(e)}",
+        )
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+async def login(request: LoginRequest):
+    """Login teacher"""
+    user = get_teacher_by_email(request.email)
+
+    if not user or not verify_password(request.password, user["password"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+        )
+
+    access_token = create_access_token(
+        data={"sub": request.email, "role": "teacher"},
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+
+    return TokenResponse(
+        access_token=access_token,
+        user=UserResponse(id=user["id"], email=user["email"], name=user["name"]),
+    )
+
+
+@app.post("/auth/resend-verification")
+async def resend_verification(request: ResendVerificationRequest):
+    """Resend verification code"""
+    try:
+        if request.email not in verification_codes:
+            existing_teacher = get_teacher_by_email(request.email)
+            existing_student = get_student_by_email(request.email)
+            if existing_teacher or existing_student:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Email already verified",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No pending verification found for this email",
+            )
+
+        stored_data = verification_codes[request.email]
+
+        code = generate_verification_code()
+        print(f"New verification code for {request.email}: {code}")
+
+        verification_codes[request.email] = {
+            "code": code,
+            "name": stored_data["name"],
+            "password": stored_data["password"],
+            "role": stored_data.get("role", "teacher"),
+            "expires_at": (datetime.utcnow() + timedelta(minutes=15)).isoformat(),
+        }
+
+        email_sent = send_verification_email(request.email, code, stored_data["name"])
+
+        return {
+            "success": True,
+            "message": "New verification code sent to your email"
+            if email_sent
+            else f"Code: {code}",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Resend verification error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to resend verification code: {str(e)}",
+        )
+
+
+@app.post("/auth/request-password-reset")
+async def request_password_reset(request: PasswordResetRequest):
+    """Request password reset code (teacher or student)"""
+    user = get_teacher_by_email(request.email) or get_student_by_email(request.email)
+
+    # Do not reveal whether email exists
+    code = generate_verification_code()
+    print(f"Password reset code for {request.email}: {code}")
+
+    password_reset_codes[request.email] = {
+        "code": code,
+        "expires_at": (datetime.utcnow() + timedelta(minutes=15)).isoformat(),
+    }
+
+    if user:
+        send_password_reset_email(request.email, code, user["name"])
+
+    return {"success": True, "message": "If account exists, reset code sent"}
+
+
+@app.post("/auth/reset-password")
+async def reset_password(request: VerifyResetCodeRequest):
+    """Reset password with code (teacher or student)"""
+    if request.email not in password_reset_codes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="No reset code found"
+        )
+
+    stored_data = password_reset_codes[request.email]
+    expires_at = datetime.fromisoformat(stored_data["expires_at"])
+
+    if datetime.utcnow() > expires_at:
+        del password_reset_codes[request.email]
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Reset code expired"
+        )
+
+    if stored_data["code"] != request.code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid reset code"
+        )
+
+    if len(request.new_password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 8 characters",
+        )
+
+    user = get_teacher_by_email(request.email)
+    if user:
+        supabase.table("teachers").update(
+            {
+                "password": get_password_hash(request.new_password),
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+        ).eq("id", user["id"]).execute()
+    else:
+        student = get_student_by_email(request.email)
+        if student:
+            supabase.table("students").update(
+                {
+                    "password": get_password_hash(request.new_password),
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
+            ).eq("id", student["id"]).execute()
+
+    del password_reset_codes[request.email]
+    return {"success": True, "message": "Password reset successfully"}
+
+
+@app.post("/auth/change-password")
+async def change_password(
+    request: ChangePasswordRequest, email: str = Depends(verify_token)
+):
+    """Change password for logged-in user - supports both teachers and students"""
+    if email not in password_reset_codes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No verification code found",
+        )
+
+    stored_data = password_reset_codes[email]
+    expires_at = datetime.fromisoformat(stored_data["expires_at"])
+
+    if datetime.utcnow() > expires_at:
+        del password_reset_codes[email]
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Verification code expired",
+        )
+
+    if stored_data["code"] != request.code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid verification code",
+        )
+
+    if len(request.new_password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 8 characters",
+        )
+
+    user = get_teacher_by_email(email)
+    if user:
+        supabase.table("teachers").update(
+            {
+                "password": get_password_hash(request.new_password),
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+        ).eq("id", user["id"]).execute()
+        del password_reset_codes[email]
+        return {"success": True, "message": "Password changed successfully"}
+
+    student = get_student_by_email(email)
+    if student:
+        supabase.table("students").update(
+            {
+                "password": get_password_hash(request.new_password),
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+        ).eq("id", student["id"]).execute()
+        del password_reset_codes[email]
+        return {"success": True, "message": "Password changed successfully"}
+
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+
+@app.post("/auth/request-change-password")
+async def request_change_password(email: str = Depends(verify_token)):
+    """Request verification code for password change - supports both teachers and students"""
+    user = get_teacher_by_email(email) or get_student_by_email(email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    code = generate_verification_code()
+    print(f"Password change code for {email}: {code}")
+
+    password_reset_codes[email] = {
+        "code": code,
+        "expires_at": (datetime.utcnow() + timedelta(minutes=15)).isoformat(),
+    }
+
+    send_password_reset_email(email, code, user["name"])
+    return {"success": True, "message": "Verification code sent"}
+
+
+@app.put("/auth/update-profile")
+async def update_profile(
+    request: UpdateProfileRequest, email: str = Depends(verify_token)
+):
+    """Update user profile - supports both teachers and students"""
+    user = get_teacher_by_email(email)
+    if user:
+        supabase.table("teachers").update(
+            {"name": request.name, "updated_at": datetime.utcnow().isoformat()}
+        ).eq("id", user["id"]).execute()
+        updated = get_teacher_by_email(email)
+        return UserResponse(
+            id=updated["id"], email=updated["email"], name=updated["name"]
+        )
+
+    student = get_student_by_email(email)
+    if student:
+        supabase.table("students").update(
+            {"name": request.name, "updated_at": datetime.utcnow().isoformat()}
+        ).eq("id", student["id"]).execute()
+        updated = get_student_by_email(email)
+        return UserResponse(
+            id=updated["id"], email=updated["email"], name=updated["name"]
+        )
+
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+
+@app.post("/auth/logout")
+async def logout(email: str = Depends(verify_token)):
+    """Logout user (stateless JWT)"""
+    return {"success": True, "message": "Logged out successfully"}
+
+
+@app.get("/auth/me", response_model=UserResponse)
+async def get_current_user(email: str = Depends(verify_token)):
+    """Get current user info (teacher or student)"""
+    user = get_teacher_by_email(email) or get_student_by_email(email)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
+        
+    return UserResponse(id=user["id"], email=user["email"], name=user["name"])
+
+
+@app.delete("/auth/delete-account")
+async def delete_account(email: str = Depends(verify_token)):
+    """Delete user account (teacher or student) and related data"""
+    try:
+        user = get_teacher_by_email(email)
+        if user:
+            supabase.table("teachers").delete().eq("id", user["id"]).execute()
+            return {"success": True, "message": "Account deleted successfully"}
+
+        student = get_student_by_email(email)
+        if student:
+            supabase.table("students").delete().eq("id", student["id"]).execute()
+            return {"success": True, "message": "Account deleted successfully"}
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Delete account error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete account",
         )
 
 
@@ -1289,269 +916,458 @@ async def verify_email(request: VerifyEmailRequest):
 
 @app.get("/classes")
 async def get_classes(email: str = Depends(verify_token)):
-    """Get all classes for the current user"""
-    user = db.get_user_by_email(email)
+    user = get_teacher_by_email(email)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    classes = db.get_all_classes(user["id"])
-    return {"classes": classes}
+
+    res = supabase.table("classes").select("*").eq("teacher_id", user["id"]).execute()
+    return res.data or []
 
 
 @app.post("/classes")
 async def create_class(class_data: ClassRequest, email: str = Depends(verify_token)):
-    """Create a new class"""
-    user = db.get_user_by_email(email)
+    user = get_teacher_by_email(email)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    created_class = db.create_class(user["id"], class_data.model_dump())
-    return {"success": True, "class": created_class}
 
+    class_id = class_data.id
+    thresholds = class_data.thresholds or {}
+
+    class_row = {
+        "id": class_id,
+        "teacher_id": user["id"],
+        "name": class_data.name,
+        "custom_columns": class_data.customColumns,
+        "thresholds": thresholds,
+        "created_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.utcnow().isoformat(),
+        "statistics": None,
+    }
+
+    supabase.table("classes").insert(class_row).execute()
+
+    for s in class_data.students:
+        student_record_id = int(s["id"])
+        enroll_row = {
+            "class_id": class_id,
+            "student_id": s.get("studentId") or "",
+            "student_record_id": student_record_id,
+            "name": s["name"],
+            "roll_no": s.get("rollNo"),
+            "email": s.get("email"),
+            "status": "active",
+        }
+        supabase.table("class_enrollments").insert(enroll_row).execute()
+
+        attendance = s.get("attendance") or {}
+        for date_str, status_val in attendance.items():
+            supabase.table("attendance_entries").insert(
+                {
+                    "class_id": class_id,
+                    "student_record_id": student_record_id,
+                    "attendance_date": date_str,
+                    "status": status_val,
+                }
+            ).execute()
+
+    return {"success": True, "class": class_row}
 
 @app.get("/classes/{class_id}")
 async def get_class(class_id: str, email: str = Depends(verify_token)):
-    """Get a specific class"""
-    user = db.get_user_by_email(email)
+    user = get_teacher_by_email(email)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    class_data = db.get_class(user["id"], class_id)
-    if not class_data:
-        raise HTTPException(status_code=404, detail="Class not found")
-    
-    return {"class": class_data}
 
+    class_id_int = int(class_id)
+
+    class_res = (
+        supabase.table("classes")
+        .select("*")
+        .eq("id", class_id_int)
+        .eq("teacher_id", user["id"])
+        .maybe_single()
+    )
+    if not class_res.data:
+        raise HTTPException(status_code=404, detail="Class not found")
+
+    enroll_res = (
+        supabase.table("class_enrollments")
+        .select("*")
+        .eq("class_id", class_id_int)
+        .eq("status", "active")
+        .execute()
+    )
+    enrollments = enroll_res.data or []
+
+    student_record_ids = [e["student_record_id"] for e in enrollments]
+    if student_record_ids:
+        att_res = (
+            supabase.table("attendance_entries")
+            .select("*")
+            .eq("class_id", class_id_int)
+            .in_("student_record_id", student_record_ids)
+            .execute()
+        )
+        attendance_rows = att_res.data or []
+    else:
+        attendance_rows = []
+
+    attendance_map: Dict[int, Dict[str, str]] = {}
+    for row in attendance_rows:
+        srid = row["student_record_id"]
+        date_str = str(row["attendance_date"])
+        status_val = row["status"]
+        attendance_map.setdefault(srid, {})[date_str] = status_val
+
+    students_payload = []
+    for e in enrollments:
+        srid = e["student_record_id"]
+        students_payload.append(
+            {
+                "id": srid,
+                "name": e["name"],
+                "rollNo": e["roll_no"],
+                "email": e["email"],
+                "attendance": attendance_map.get(srid, {}),
+            }
+        )
+
+    payload = class_res.data
+    payload["students"] = students_payload
+    return payload
 
 @app.put("/classes/{class_id}")
-async def update_class(class_id: str, class_data: ClassRequest, email: str = Depends(verify_token)):
-    """
-    Update a class - handles student deletions AND preserves inactive student data
-    """
-    print(f"\n{'='*60}")
-    print(f"[UPDATE_CLASS] Starting update for class {class_id}")
-    print(f"{'='*60}")
-    
-    # Get user
-    user = db.get_user_by_email(email)
+async def update_class(
+    class_id: str,
+    class_data: ClassRequest,
+    email: str = Depends(verify_token),
+):
+    user = get_teacher_by_email(email)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    user_id = user['id']
-    
-    # Get FULL current class data from FILE (RAW - not filtered)
-    class_file = db.get_class_file(user_id, class_id)
-    current_class = db.read_json(class_file)
-    
-    if not current_class:
-        raise HTTPException(status_code=404, detail="Class not found")
-    
-    all_students_in_file = current_class.get('students', [])
-    print(f"[UPDATE_CLASS] 📁 Students in FILE: {len(all_students_in_file)}")
-    for s in all_students_in_file:
-        attendance_count = len(s.get('attendance', {}))
-        print(f"  - ID: {s.get('id')}, Name: {s.get('name')}, Attendance: {attendance_count}")
-    
-    incoming_students = class_data.students
-    print(f"\n[UPDATE_CLASS] 📥 Students in REQUEST: {len(incoming_students)}")
-    for s in incoming_students:
-        attendance_count = len(s.get('attendance', {}))
-        print(f"  - ID: {s.get('id')}, Name: {s.get('name')}, Attendance: {attendance_count}")
-    
-    # Get current student IDs
-    current_student_ids = {s.get('id') for s in all_students_in_file}
-    new_student_ids = {s.get('id') for s in incoming_students}
-    
-    # Find deleted students
-    deleted_student_ids = current_student_ids - new_student_ids
-    
-    print(f"\n[UPDATE_CLASS] 🔍 Analysis:")
-    print(f"  - Current IDs: {current_student_ids}")
-    print(f"  - New IDs: {new_student_ids}")
-    print(f"  - Deleted IDs: {deleted_student_ids}")
-    
-    if deleted_student_ids:
-        print(f"\n[UPDATE_CLASS] ⚠️ Students DELETED by teacher: {deleted_student_ids}")
-        
-        # Mark deleted students as inactive in enrollments
-        enrollment_file = db.get_enrollment_file(class_id)
-        enrollments = db.read_json(enrollment_file) or []
-        
-        for enrollment in enrollments:
-            if enrollment.get('student_record_id') in deleted_student_ids:
-                old_status = enrollment.get('status')
-                enrollment['status'] = 'inactive'
-                enrollment['removed_by_teacher_at'] = datetime.utcnow().isoformat()
-                print(f"  - Marked enrollment {enrollment.get('student_record_id')} as inactive (was: {old_status})")
-                
-                # Update student's enrolled_classes
-                student_id = enrollment.get('student_id')
-                if student_id:
-                    try:
-                        student_data = db.get_student(student_id)
-                        if student_data:
-                            enrolled_classes = student_data.get('enrolled_classes', [])
-                            enrolled_classes = [ec for ec in enrolled_classes if ec.get('class_id') != class_id]
-                            db.update_student(student_id, {"enrolled_classes": enrolled_classes})
-                    except Exception as e:
-                        print(f"  - Error updating student {student_id}: {e}")
-        
-        db.write_json(enrollment_file, enrollments)
-    
-    # Build final student list
-    updated_students_map = {s.get('id'): s for s in incoming_students}
-    final_students = []
-    
-    print(f"\n[UPDATE_CLASS] 🔨 Building final student list:")
-    for student in all_students_in_file:
-        student_id = student.get('id')
-        
-        if student_id in updated_students_map:
-            # Active student - use updated data from request
-            updated = updated_students_map[student_id]
-            final_students.append(updated)
-            print(f"  ✓ Including ACTIVE: {student.get('name')} (ID: {student_id}) - Attendance: {len(updated.get('attendance', {}))}")
-        else:
-            # Inactive student - preserve from file
-            final_students.append(student)
-            print(f"  ✓ Preserving INACTIVE: {student.get('name')} (ID: {student_id}) - Attendance: {len(student.get('attendance', {}))}")
-    
-    print(f"\n[UPDATE_CLASS] 💾 Final count: {len(final_students)} total students")
-    print(f"  - Active: {len(incoming_students)}")
-    print(f"  - Inactive: {len(final_students) - len(incoming_students)}")
-    
-    # Update class data
-    updated_class_data = {
-        "id": class_data.id,
-        "name": class_data.name,
-        "students": final_students,  # ALL students
-        "customColumns": class_data.customColumns,
-        "thresholds": class_data.thresholds,
-        "teacher_id": user_id,
-        "created_at": current_class.get('created_at'),
-        "updated_at": datetime.utcnow().isoformat(),
-        "statistics": db.calculate_class_statistics(class_data.dict(), class_id)
-    }
-    
-    # Write to file
-    db.write_json(class_file, updated_class_data)
-    print(f"\n[UPDATE_CLASS] ✅ Saved to file with {len(final_students)} students")
-    
-    # Verify what was written
-    verification = db.read_json(class_file)
-    print(f"[UPDATE_CLASS] 🔍 Verification: File now has {len(verification.get('students', []))} students")
-    
-    # Update teacher overview
-    db.update_user_overview(user_id)
-    
-    print(f"{'='*60}\n")
-    
-    # Return only active students to frontend
-    response_data = updated_class_data.copy()
-    response_data['students'] = class_data.students
-    
-    return {"success": True, "class": response_data}
 
+    class_id_int = int(class_id)
+
+    # Ensure class belongs to this teacher
+    class_res = (
+        supabase.table("classes")
+        .select("*")
+        .eq("id", class_id_int)
+        .eq("teacher_id", user["id"])
+        .maybe_single()
+    )
+    if not class_res.data:
+        raise HTTPException(status_code=404, detail="Class not found")
+
+    # 1) Update basic class fields
+    supabase.table("classes").update(
+        {
+            "name": class_data.name,
+            "custom_columns": class_data.customColumns,
+            "thresholds": class_data.thresholds or {},
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+    ).eq("id", class_id_int).execute()
+
+    # 2) Sync enrollments (active list = class_data.students)
+    enroll_res = (
+        supabase.table("class_enrollments")
+        .select("*")
+        .eq("class_id", class_id_int)
+        .execute()
+    )
+    existing_enrollments = {e["student_record_id"]: e for e in (enroll_res.data or [])}
+
+    incoming_ids = set(int(s["id"]) for s in class_data.students)
+    existing_ids = set(existing_enrollments.keys())
+
+    # Newly added students
+    for s in class_data.students:
+        srid = int(s["id"])
+        if srid not in existing_ids:
+            enroll_row = {
+                "class_id": class_id_int,
+                "student_id": s.get("studentId") or "",
+                "student_record_id": srid,
+                "name": s["name"],
+                "roll_no": s.get("rollNo"),
+                "email": s.get("email"),
+                "status": "active",
+                "enrolled_at": datetime.utcnow().isoformat(),
+            }
+            supabase.table("class_enrollments").insert(enroll_row).execute()
+        else:
+            # Existing: update basic info and ensure status active
+            supabase.table("class_enrollments").update(
+                {
+                    "name": s["name"],
+                    "roll_no": s.get("rollNo"),
+                    "email": s.get("email"),
+                    "status": "active",
+                }
+            ).eq("class_id", class_id_int).eq("student_record_id", srid).execute()
+
+    # Students removed in UI → mark inactive (do NOT delete)
+    deleted_ids = existing_ids - incoming_ids
+    if deleted_ids:
+        supabase.table("class_enrollments").update(
+            {
+                "status": "inactive",
+                "unenrolled_at": datetime.utcnow().isoformat(),
+            }
+        ).eq("class_id", class_id_int).in_("student_record_id", list(deleted_ids)).execute()
+
+    # 3) Sync attendance map for each student
+    for s in class_data.students:
+        srid = int(s["id"])
+        attendance = s.get("attendance") or {}
+        for date_str, status_val in attendance.items():
+            # Upsert row for (class_id, student_record_id, date)
+            existing_att = (
+                supabase.table("attendance_entries")
+                .select("id")
+                .eq("class_id", class_id_int)
+                .eq("student_record_id", srid)
+                .eq("attendance_date", date_str)
+                .maybe_single()
+            )
+            if existing_att.data:
+                supabase.table("attendance_entries").update(
+                    {"status": status_val}
+                ).eq("id", existing_att.data["id"]).execute()
+            else:
+                supabase.table("attendance_entries").insert(
+                    {
+                        "class_id": class_id_int,
+                        "student_record_id": srid,
+                        "attendance_date": date_str,
+                        "status": status_val,
+                    }
+                ).execute()
+
+    return {"success": True}
 
 @app.delete("/classes/{class_id}")
 async def delete_class(class_id: str, email: str = Depends(verify_token)):
-    """Delete a class"""
-    user = db.get_user_by_email(email)
+    user = get_teacher_by_email(email)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    success = db.delete_class(user["id"], class_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Class not found")
-    
+
+    class_id_int = int(class_id)
+
+    # Ensure class belongs to this teacher
+    class_res = (
+        supabase.table("classes")
+        .select("id, teacher_id")
+        .eq("id", class_id_int)
+        .maybe_single()
+    )
+    if not class_res.data or class_res.data["teacher_id"] != user["id"]:
+        raise HTTPException(status_code=404, detail="Class not found or unauthorized")
+
+    # Delete related data (foreign keys are ON DELETE CASCADE, but this is explicit)
+    supabase.table("attendance_entries").delete().eq("class_id", class_id_int).execute()
+    supabase.table("class_enrollments").delete().eq("class_id", class_id_int).execute()
+    supabase.table("qr_scanned_students").delete().eq("class_id", class_id_int).execute()
+    supabase.table("qr_sessions").delete().eq("class_id", class_id_int).execute()
+
+    # Finally delete the class
+    supabase.table("classes").delete().eq("id", class_id_int).execute()
+
     return {"success": True, "message": "Class deleted successfully"}
 
-
-# ==================== CONTACT ENDPOINT ====================
-
-@app.post("/contact")
-async def submit_contact(request: ContactRequest):
-    """Submit contact form"""
-    try:
-        message_data = {
-            "name": request.name,
-            "subject": request.subject,
-            "message": request.message
-        }
-        
-        success = db.save_contact_message(request.email, message_data)
-        
-        if success:
-            return {"success": True, "message": "Message received successfully"}
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to save message"
-            )
-    except Exception as e:
-        print(f"Contact form error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to process contact form"
-        )
     
     # ==================== QR CODE ATTENDANCE ENDPOINTS ====================
 
 @app.post("/qr/start-session")
 async def start_qr_session(request: dict, email: str = Depends(verify_token)):
     class_id = request.get("class_id")
-    rotation_interval = request.get("rotation_interval", 5)
-    
+    rotation_interval = int(request.get("rotation_interval", 5))
+
+    if not class_id:
+        raise HTTPException(status_code=400, detail="class_id required")
+
     print(f"[API] QR start request: class_id={class_id}")
-    
-    user = db.get_user_by_email(email)
+
+    user = get_teacher_by_email(email)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    session = db.start_qr_session(class_id, user["id"], rotation_interval)
-    return {"success": True, "session": session}
+
+    class_id_int = int(class_id)
+
+    # Verify class belongs to this teacher
+    class_res = (
+        supabase.table("classes")
+        .select("id, teacher_id")
+        .eq("id", class_id_int)
+        .maybe_single()
+    )
+    if not class_res.data or class_res.data["teacher_id"] != user["id"]:
+        raise HTTPException(status_code=404, detail="Class not found or unauthorized")
+
+    today = datetime.utcnow().date()
+    # You can replace this with your own QR code generator if you prefer letters+digits
+    qr_code = generate_verification_code()
+
+    session_row = {
+        "class_id": class_id_int,
+        "teacher_id": user["id"],
+        "started_at": datetime.utcnow().isoformat(),
+        "rotation_interval": rotation_interval,
+        "current_code": qr_code,
+        "code_generated_at": datetime.utcnow().isoformat(),
+        "attendance_date": today.isoformat(),
+        "status": "active",
+        "last_scan_at": None,
+        "stopped_at": None,
+    }
+
+    # Upsert session for this class
+    existing = (
+        supabase.table("qr_sessions")
+        .select("class_id")
+        .eq("class_id", class_id_int)
+        .maybe_single()
+    )
+    if existing.data:
+        supabase.table("qr_sessions").update(session_row).eq("class_id", class_id_int).execute()
+        supabase.table("qr_scanned_students").delete().eq("class_id", class_id_int).execute()
+    else:
+        supabase.table("qr_sessions").insert(session_row).execute()
+
+    return {"success": True, "session": session_row}
 
 @app.get("/qr/session/{class_id}")
 async def get_qr_session(class_id: str, email: str = Depends(verify_token)):
-    user = db.get_user_by_email(email)
+    user = get_teacher_by_email(email)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    session = db.get_qr_session(class_id)
+
+    class_id_int = int(class_id)
+
+    session_res = (
+        supabase.table("qr_sessions")
+        .select("*")
+        .eq("class_id", class_id_int)
+        .eq("status", "active")
+        .maybe_single()
+    )
+    session = session_res.data
     if not session or session["teacher_id"] != user["id"]:
         return {"active": False}
-    
+
     return {"active": True, "session": session}
 
 @app.post("/qr/scan")
 async def scan_qr_code(
     class_id: str,
     qr_code: str,
-    email: str = Depends(verify_token)
+    email: str = Depends(verify_token),
 ):
     """
     Student scans QR code to mark attendance
     """
     try:
-        student = db.get_student_by_email(email)
+        student = get_student_by_email(email)
         if not student:
             raise HTTPException(status_code=404, detail="Student not found")
-        
-        student_id = student["id"]
-        
-        result = db.scan_qr_code(student_id, class_id, qr_code)
-        
-        return result
-    
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+
+        class_id_int = int(class_id)
+
+        # Load active session
+        session_res = (
+            supabase.table("qr_sessions")
+            .select("*")
+            .eq("class_id", class_id_int)
+            .eq("status", "active")
+            .maybe_single()
+        )
+        session = session_res.data
+        if not session:
+            raise HTTPException(status_code=400, detail="No active session")
+
+        if session["current_code"] != qr_code:
+            raise HTTPException(status_code=400, detail="Invalid or expired QR code")
+
+        attendance_date = session["attendance_date"]
+
+        # Find enrollment for this student in this class to get student_record_id
+        enroll_res = (
+            supabase.table("class_enrollments")
+            .select("*")
+            .eq("class_id", class_id_int)
+            .eq("student_id", student["id"])
+            .eq("status", "active")
+            .maybe_single()
+        )
+        enrollment = enroll_res.data
+        if not enrollment:
+            raise HTTPException(
+                status_code=400,
+                detail="Student not actively enrolled in this class",
+            )
+
+        student_record_id = enrollment["student_record_id"]
+
+        # Mark attendance as Present
+        existing_att = (
+            supabase.table("attendance_entries")
+            .select("id")
+            .eq("class_id", class_id_int)
+            .eq("student_record_id", student_record_id)
+            .eq("attendance_date", attendance_date)
+            .maybe_single()
+        )
+        if existing_att.data:
+            supabase.table("attendance_entries").update(
+                {"status": "P"}
+            ).eq("id", existing_att.data["id"]).execute()
+        else:
+            supabase.table("attendance_entries").insert(
+                {
+                    "class_id": class_id_int,
+                    "student_record_id": student_record_id,
+                    "attendance_date": attendance_date,
+                    "status": "P",
+                }
+            ).execute()
+
+        # Record scan
+        existing_scan = (
+            supabase.table("qr_scanned_students")
+            .select("id")
+            .eq("class_id", class_id_int)
+            .eq("student_record_id", student_record_id)
+            .maybe_single()
+        )
+        if not existing_scan.data:
+            supabase.table("qr_scanned_students").insert(
+                {
+                    "class_id": class_id_int,
+                    "student_record_id": student_record_id,
+                }
+            ).execute()
+
+        supabase.table("qr_sessions").update(
+            {"last_scan_at": datetime.utcnow().isoformat()}
+        ).eq("class_id", class_id_int).execute()
+
+        return {
+            "success": True,
+            "message": "Attendance marked as Present",
+            "date": attendance_date,
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"QR scan error: {e}")
         import traceback
+
         traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to scan QR code"
+            detail="Failed to scan QR code",
         )
 
 @app.post("/qr/stop-session")
@@ -1560,17 +1376,115 @@ async def stop_qr_session(payload: dict, email: str = Depends(verify_token)):
     if not class_id:
         raise HTTPException(status_code=400, detail="class_id required")
 
-    user = db.get_user_by_email(email)
+    user = get_teacher_by_email(email)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    class_id_int = int(class_id)
+
     try:
-        result = db.stop_qr_session(class_id, user["id"])
-        return result
+        session_res = (
+            supabase.table("qr_sessions")
+            .select("*")
+            .eq("class_id", class_id_int)
+            .eq("status", "active")
+            .maybe_single()
+        )
+        session = session_res.data
+        if not session or session["teacher_id"] != user["id"]:
+            raise HTTPException(status_code=400, detail="No active session or unauthorized")
+
+        attendance_date = session["attendance_date"]
+
+        # Active enrollments
+        enroll_res = (
+            supabase.table("class_enrollments")
+            .select("student_record_id")
+            .eq("class_id", class_id_int)
+            .eq("status", "active")
+            .execute()
+        )
+        active_ids = [e["student_record_id"] for e in (enroll_res.data or [])]
+
+        # Scanned IDs
+        scan_res = (
+            supabase.table("qr_scanned_students")
+            .select("student_record_id")
+            .eq("class_id", class_id_int)
+            .execute()
+        )
+        scanned_ids = {r["student_record_id"] for r in (scan_res.data or [])}
+
+        absent_count = 0
+        for srid in active_ids:
+            if srid in scanned_ids:
+                continue
+
+            existing_att = (
+                supabase.table("attendance_entries")
+                .select("id, status")
+                .eq("class_id", class_id_int)
+                .eq("student_record_id", srid)
+                .eq("attendance_date", attendance_date)
+                .maybe_single()
+            )
+            if existing_att.data:
+                # already marked (e.g. P/L) – do not override
+                continue
+
+            supabase.table("attendance_entries").insert(
+                {
+                    "class_id": class_id_int,
+                    "student_record_id": srid,
+                    "attendance_date": attendance_date,
+                    "status": "A",
+                }
+            ).execute()
+            absent_count += 1
+
+        supabase.table("qr_sessions").update(
+            {"status": "stopped", "stopped_at": datetime.utcnow().isoformat()}
+        ).eq("class_id", class_id_int).execute()
+
+        return {
+            "success": True,
+            "absent_count": absent_count,
+            "date": attendance_date,
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[QR_STOP] Error: {e}")
         raise HTTPException(status_code=500, detail="Failed to stop QR session")
 
+# ==================== CONTACT ENDPOINT ====================
+
+@app.post("/contact")
+async def submit_contact(request: ContactRequest):
+    """Submit contact form"""
+    try:
+        message_data = {
+            "email": request.email,
+            "name": request.name,
+            "subject": request.subject,
+            "message": request.message,
+            "created_at": datetime.utcnow().isoformat(),
+            "status": "unread"
+        }
+        
+        supabase.table("contact_messages").insert(message_data).execute()
+        
+        return {"success": True, "message": "Message received successfully"}
+    
+    except Exception as e:
+        print(f"Contact form error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process contact form"
+        )
+    
+    
 
 if __name__ == "__main__":
     import uvicorn
